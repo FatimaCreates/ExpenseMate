@@ -6,13 +6,16 @@ specific logged-in user.
 """
 
 import csv
-import database as db
+
+from services.transaction_service import TransactionService
+
+_transactions = TransactionService()
 
 CSV_HEADERS = ["date", "type", "category", "amount", "note"]
 
 
 def export_transactions_to_csv(user_id, filepath):
-    transactions = db.get_transactions(user_id)
+    transactions = _transactions.list_transactions(user_id)
 
     with open(filepath, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
@@ -50,7 +53,7 @@ def import_transactions_from_csv(user_id, filepath):
                 if not date or not category:
                     raise ValueError("missing date or category")
 
-                db.add_transaction(user_id, date, type_, category, amount, note)
+                _transactions.add_transaction(user_id, date, type_, category, amount, note)
                 imported += 1
 
             except (KeyError, ValueError, TypeError) as e:

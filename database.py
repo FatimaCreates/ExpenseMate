@@ -1,61 +1,27 @@
 """
-Handles all interaction with the SQLite database for ExpenseMate.
+Database layer for ExpenseMate (SQLite).
 Responsibilities:
-    - Creating the database and tables (schema) if they don't exist
-    - CRUD operations for users (register / login)
-    - CRUD operations for transactions, budgets, savings goals, and categories
+    - connection settings (get_connection) and schema creation (init_db)
+
+All SQL for reading/writing data now lives in repositories/, and the rules in
+services/. The functions below this point are thin BACKWARD-COMPATIBLE
+wrappers kept so Assignment 01 callers and tests keep working
+(see Assignment 02, Part B). New code uses controllers -> services -> repositories.
 
 """
 
 import sqlite3
-import hashlib
-import re
-from datetime import date
 
 DB_NAME = "expensemate.db"
 SCHEMA_VERSION = 1   # 1 = category_id foreign keys (migration m001)
 
-DEFAULT_CATEGORIES = [
-    "Food",
-    "Transport",
-    "Salary",
-    "Bills",
-    "Rent",
-    "Entertainment",
-    "Health",
-    "Shopping",
-    "Education",
-    "Other",
-]
-
-SUPPORTED_CURRENCIES = {
-    "PKR": "Rs.",
-    "USD": "$",
-    "EUR": "€",
-    "GBP": "£",
-}
+from constants import DEFAULT_CATEGORIES, SUPPORTED_CURRENCIES  # noqa: F401 (re-exported)
 
 
 def validate_date(value):
-    """
-    Validate and normalise a transaction date.
-
-    Accepts 'YYYY-M-D' / 'YYYY-MM-DD' and returns zero-padded 'YYYY-MM-DD'
-    (so the monthly filter `startswith('YYYY-MM')` always matches).
-    Raises ValueError("Invalid date ...") for malformed/impossible dates and
-    ValueError("... in the future") for dates after today.
-    """
-    text = str(value).strip() if value is not None else ""
-    if not re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", text):
-        raise ValueError(f"Invalid date '{value}'. Use YYYY-MM-DD.")
-    year, month, day = (int(part) for part in text.split("-"))
-    try:
-        parsed = date(year, month, day)
-    except ValueError:
-        raise ValueError(f"Invalid date '{value}'. Use YYYY-MM-DD.")
-    if parsed > date.today():
-        raise ValueError(f"Date '{parsed.isoformat()}' is in the future.")
-    return parsed.isoformat()
+    """Kept for backward compatibility; the rule now lives in services.validators."""
+    from services.validators import validate_date as _validate
+    return _validate(value)
 
 
 def get_connection():
@@ -174,314 +140,94 @@ def init_db():
     conn.close()
 
 
-def _category_id(cur, user_id, name):
-    """
-    Return the id of this user's category called `name` (case-insensitive),
-    creating it if it does not exist yet. Keeps 'food' and 'Food' as ONE category.
-    """
-    name = (name or "").strip()
-    if not name:
-        raise ValueError("Category cannot be empty.")
-    cur.execute(
-        "SELECT id FROM categories WHERE user_id = ? AND name = ? COLLATE NOCASE",
-        (user_id, name),
-    )
-    row = cur.fetchone()
-    if row:
-        return row["id"]
-    cur.execute("INSERT INTO categories (user_id, name) VALUES (?, ?)", (user_id, name))
-    return cur.lastrowid
+# ---------------------------------------------------------------------------
+# Legacy API (thin wrappers; lazy imports avoid an import cycle with repositories)
+# ---------------------------------------------------------------------------
 
+def _services():
+    import services
+    return services
 
 
 # USERS / AUTH
 
-def _hash_password(password):
-    """Return a SHA-256 hash of the password. We never store plain text."""
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
-
-
 def register_user(username, password, currency="PKR"):
-    username = (username or "").strip()
-    if not username:
-        return False, "Username cannot be empty."
-    if not password:
-        return False, "Password cannot be empty."
-    if currency not in SUPPORTED_CURRENCIES:
-        currency = "PKR"
-
-    conn = get_connection()
-    cur = conn.cursor()
     try:
-        cur.execute(
-            "INSERT INTO users (username, password_hash, currency) VALUES (?, ?, ?)",
-            (username, _hash_password(password), currency),
-        )
-        conn.commit()
-        user_id = cur.lastrowid
-
-        # Seed default categories for this brand-new user.
-        for name in DEFAULT_CATEGORIES:
-            try:
-                cur.execute(
-                    "INSERT INTO categories (user_id, name) VALUES (?, ?)",
-                    (user_id, name),
-                )
-            except sqlite3.IntegrityError:
-                pass
-        conn.commit()
-
-        return True, user_id
-    except sqlite3.IntegrityError:
-        return False, "Username already exists."
-    finally:
-        conn.close()
+        return True, _services().UserService().register(username, password, currency)
+    except ValueError as exc:
+        return False, str(exc)
 
 
 def verify_user(username, password):
-    """
-    Check username/password against the database.
-    Returns the user's dict if valid, otherwise None.
-    """
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE username = ?", (username,))
-    row = cur.fetchone()
-    conn.close()
-
-    if row and row["password_hash"] == _hash_password(password):
-        return dict(row)
-    return None
+    return _services().UserService().verify(username, password)
 
 
 def get_user(user_id):
-    """Fetch a single user's info by id."""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    return _services().UserService().get_user(user_id)
+
 
 def set_user_currency(user_id, currency):
-    """Update a user's display currency (no conversion of existing amounts)."""
-    if currency not in SUPPORTED_CURRENCIES:
-        raise ValueError(f"Unsupported currency '{currency}'.")
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET currency=? WHERE id=?", (currency, user_id))
-    conn.commit()
-    conn.close()
+    _services().UserService().set_currency(user_id, currency)
 
-# ---------------------------------------------------------------------------
+
 # TRANSACTIONS
-# ---------------------------------------------------------------------------
 
 def add_transaction(user_id, date, type_, category, amount, note=""):
-    if amount is None or amount < 0:
-        raise ValueError("Amount must be zero or greater.") #bug1 fix
-    date = validate_date(date)
-    conn = get_connection()
-    cur = conn.cursor()
-    category_id = _category_id(cur, user_id, category)
-    cur.execute(
-        "INSERT INTO transactions (user_id, date, type, category_id, amount, note) VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, date, type_, category_id, amount, note),
-    )
-    conn.commit()
-    conn.close()
+    _services().TransactionService().add_transaction(user_id, date, type_, category, amount, note)
 
 
 def get_transactions(user_id):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """SELECT t.id, t.user_id, t.date, t.type, c.name AS category,
-                  t.category_id, t.amount, t.note
-           FROM transactions t
-           JOIN categories c ON c.id = t.category_id
-           WHERE t.user_id = ?
-           ORDER BY t.date DESC, t.id DESC""",
-        (user_id,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    return _services().TransactionService().list_transactions(user_id)
 
 
 def update_transaction(txn_id, date, type_, category, amount, note=""):
-    date = validate_date(date)
-    conn = get_connection()
-    cur = conn.cursor()
-    owner = cur.execute("SELECT user_id FROM transactions WHERE id=?", (txn_id,)).fetchone()
-    if owner is None:
-        conn.close()
-        return
-    category_id = _category_id(cur, owner["user_id"], category)
-    cur.execute(
-        """UPDATE transactions
-           SET date=?, type=?, category_id=?, amount=?, note=?
-           WHERE id=?""",
-        (date, type_, category_id, amount, note, txn_id),
-    )
-    conn.commit()
-    conn.close()
+    _services().TransactionService().update_transaction(txn_id, date, type_, category, amount, note)
 
 
 def delete_transaction(txn_id):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
-    conn.commit()
-    conn.close()
+    _services().TransactionService().delete_transaction(txn_id)
 
 
 # BUDGETS
 
-
 def set_budget(user_id, category, monthly_limit):
-    if monthly_limit is None or monthly_limit < 0:
-        raise ValueError("Monthly limit must be zero or greater.")
-    conn = get_connection()
-    cur = conn.cursor()
-    category_id = _category_id(cur, user_id, category)
-    cur.execute("""
-        INSERT INTO budgets (user_id, category_id, monthly_limit)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id, category_id) DO UPDATE SET monthly_limit=excluded.monthly_limit
-    """, (user_id, category_id, monthly_limit))
-    conn.commit()
-    conn.close()
+    _services().BudgetService().set_budget(user_id, category, monthly_limit)
 
 
 def get_budgets(user_id):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """SELECT b.id, b.user_id, c.name AS category, b.category_id, b.monthly_limit
-           FROM budgets b
-           JOIN categories c ON c.id = b.category_id
-           WHERE b.user_id = ?""",
-        (user_id,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    return _services().BudgetService().list_budgets(user_id)
 
 
 # SAVINGS GOALS
 
-
 def add_savings_goal(user_id, name, target_amount):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO savings_goals (user_id, name, target_amount, saved_amount) VALUES (?, ?, ?, 0)",
-        (user_id, name, target_amount),
-    )
-    conn.commit()
-    conn.close()
+    _services().SavingsService().add_goal(user_id, name, target_amount)
 
 
 def update_savings_progress(goal_id, saved_amount):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE savings_goals SET saved_amount=? WHERE id=?",
-        (saved_amount, goal_id),
-    )
-    conn.commit()
-    conn.close()
+    _services().SavingsService().update_progress(goal_id, saved_amount)
 
 
 def get_savings_goals(user_id):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM savings_goals WHERE user_id = ?", (user_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    return _services().SavingsService().list_goals(user_id)
 
 
 # CATEGORIES
 
-
 def get_categories(user_id):
-    """Return a sorted list of category names (strings) that belong to this user."""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT name FROM categories WHERE user_id = ? ORDER BY name COLLATE NOCASE", (user_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return [row["name"] for row in rows]
+    return _services().CategoryService().list_names(user_id)
 
 
 def add_category(user_id, name):
-    """
-    Add a new category for this user. Returns (True, name) on success,
-    or (False, error_message) if it already exists (case-insensitively).
-    """
-    name = name.strip()
-    if not name:
-        return False, "Category name cannot be empty."
-
-    existing = {c.lower() for c in get_categories(user_id)}
-    if name.lower() in existing:
-        return False, f"Category '{name}' already exists."
-
-    conn = get_connection()
-    cur = conn.cursor()
     try:
-        cur.execute(
-            "INSERT INTO categories (user_id, name) VALUES (?, ?)",
-            (user_id, name),
-        )
-        conn.commit()
-        return True, name
-    except sqlite3.IntegrityError:
-        return False, f"Category '{name}' already exists."
-    finally:
-        conn.close()
+        return True, _services().CategoryService().add_category(user_id, name)
+    except ValueError as exc:
+        return False, str(exc)
 
 
 def delete_category(user_id, name):
-    """Delete an unused category. A category that transactions or budgets still
-    point to cannot be deleted (foreign key), so we explain why instead of failing."""
-    conn = get_connection()
-    cur = conn.cursor()
-    row = cur.execute(
-        "SELECT id FROM categories WHERE user_id = ? AND name = ?", (user_id, name)
-    ).fetchone()
-    if row is not None:
-        in_use = cur.execute(
-            "SELECT (SELECT COUNT(*) FROM transactions WHERE category_id = ?) "
-            "     + (SELECT COUNT(*) FROM budgets WHERE category_id = ?)",
-            (row["id"], row["id"]),
-        ).fetchone()[0]
-        if in_use:
-            conn.close()
-            raise ValueError(f"Category '{name}' is used by existing transactions or budgets.")
-    cur.execute("DELETE FROM categories WHERE user_id = ? AND name = ?", (user_id, name))
-    conn.commit()
-    conn.close()
+    _services().CategoryService().delete_category(user_id, name)
 
 
 def ensure_default_categories(user_id):
-    """
-    Make sure this user has at least the default categories. Useful for
-    users who registered before the categories table existed.
-    """
-    existing = {c.lower() for c in get_categories(user_id)}
-    conn = get_connection()
-    cur = conn.cursor()
-    for name in DEFAULT_CATEGORIES:
-        if name.lower() not in existing:
-            try:
-                cur.execute(
-                    "INSERT INTO categories (user_id, name) VALUES (?, ?)",
-                    (user_id, name),
-                )
-            except sqlite3.IntegrityError:
-                pass
-    conn.commit()
-    conn.close()
+    _services().CategoryService().ensure_defaults(user_id)
