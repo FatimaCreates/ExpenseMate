@@ -3,8 +3,18 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 
 import database as db
-import logic
 import import_export as ie
+from constants import SUPPORTED_CURRENCIES
+from controllers import (
+    TransactionController, BudgetController, UserController,
+    CategoryController, SavingsController,
+)
+
+transaction_controller = TransactionController()
+budget_controller = BudgetController()
+user_controller = UserController()
+category_controller = CategoryController()
+savings_controller = SavingsController()
 
 #versionfinalofcode
 
@@ -392,12 +402,12 @@ def login_screen():
                 submitted = st.form_submit_button("Login", use_container_width=True)
 
                 if submitted:
-                    user = db.verify_user(username.strip(), password)
-                    if user:
-                        st.session_state["user"] = user
+                    result = user_controller.login(username, password)
+                    if result.ok:
+                        st.session_state["user"] = result.data
                         st.rerun()
                     else:
-                        st.error("Incorrect username or password.")
+                        st.error(result.message)
         else:
             with st.form("register_form"):
                 new_username = st.text_input("👤 Choose a Username")
@@ -405,22 +415,19 @@ def login_screen():
                 confirm_password = st.text_input("🔒 Confirm Password", type="password")
                 new_currency = st.selectbox(
                     "💱 Currency",
-                    list(db.SUPPORTED_CURRENCIES.keys()),
-                    format_func=lambda c: f"{c} ({db.SUPPORTED_CURRENCIES[c]})",
+                    list(SUPPORTED_CURRENCIES.keys()),
+                    format_func=lambda c: f"{c} ({SUPPORTED_CURRENCIES[c]})",
                 )
                 submitted = st.form_submit_button("Register", use_container_width=True)
 
                 if submitted:
-                    if not new_username.strip() or not new_password:
-                        st.error("Please fill in all fields.")
-                    elif new_password != confirm_password:
-                        st.error("Passwords do not match.")
+                    result = user_controller.register(
+                        new_username, new_password, confirm_password, new_currency
+                    )
+                    if result.ok:
+                        st.success(result.message)
                     else:
-                        ok, result = db.register_user(new_username.strip(), new_password, new_currency)
-                        if ok:
-                            st.success("Account created! Switch to Login to continue.")
-                        else:
-                            st.error(result)
+                        st.error(result.message)
 
 
 if st.session_state["user"] is None:
@@ -431,9 +438,9 @@ user = st.session_state["user"]
 user_id = user["id"]
 
 # Multi-currency: each user has one display currency (no conversion).
-CURRENCY_SYMBOL = db.SUPPORTED_CURRENCIES.get(user.get("currency", "PKR"), "Rs.")
+CURRENCY_SYMBOL = SUPPORTED_CURRENCIES.get(user.get("currency", "PKR"), "Rs.")
 
-db.ensure_default_categories(user_id)
+category_controller.ensure_defaults(user_id)
 
 # SIDEBAR: WELCOME + NAVIGATION (no profile picture)
 
@@ -445,17 +452,17 @@ if st.sidebar.button("Log out"):
     st.rerun()
 
 st.sidebar.markdown("---")
-currency_codes = list(db.SUPPORTED_CURRENCIES.keys())
+currency_codes = list(SUPPORTED_CURRENCIES.keys())
 current_currency = user.get("currency", "PKR")
 chosen_currency = st.sidebar.selectbox(
     "💱 Currency",
     currency_codes,
     index=currency_codes.index(current_currency) if current_currency in currency_codes else 0,
-    format_func=lambda c: f"{c} ({db.SUPPORTED_CURRENCIES[c]})",
+    format_func=lambda c: f"{c} ({SUPPORTED_CURRENCIES[c]})",
     key="currency_selector",
 )
 if chosen_currency != current_currency:
-    db.set_user_currency(user_id, chosen_currency)
+    user_controller.change_currency(user_id, chosen_currency)
     st.session_state["user"]["currency"] = chosen_currency
     st.rerun()
 
@@ -508,7 +515,9 @@ if page == "Dashboard":
     st.title("Dashboard")
     st.caption(f"Showing summary for {current_month}")
 
-    alerts = logic.check_budget_alerts(user_id, current_month)
+    # Monthly Budget Summary: one controller call (Controller -> Service -> Repository)
+    report = budget_controller.monthly_summary(user_id, current_month).data
+    alerts = report["alerts"]
     for a in alerts:
         st.markdown(
             f"""<div class="alert-banner">⚠️ You've gone over budget in
@@ -517,7 +526,7 @@ if page == "Dashboard":
             unsafe_allow_html=True,
         )
 
-    summary = logic.get_monthly_summary(user_id, current_month)
+    summary = report["summary"]
     col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown(f"""<div class="summary-card" style="--card-accent:{COLOR_INCOME}">
@@ -541,7 +550,7 @@ if page == "Dashboard":
 
     with chart_col:
         st.subheader("Spending by Category")
-        cat_summary = logic.get_category_summary(user_id, current_month, type_="expense")
+        cat_summary = report["category_totals"]
         if cat_summary:
             fig, ax = plt.subplots()
             fig.patch.set_facecolor(COLOR_BG)
@@ -558,7 +567,7 @@ if page == "Dashboard":
 
     with budget_col:
         st.subheader("Budget Progress")
-        progress = logic.get_budget_progress(user_id, current_month)
+        progress = report["progress"]
         if progress:
             for p in progress:
                 pct = min(p["percent"], 100) / 100
@@ -569,7 +578,7 @@ if page == "Dashboard":
 
     st.write("")
     st.subheader("Savings Goals")
-    goals = logic.get_savings_progress(user_id)
+    goals = savings_controller.goals_progress(user_id).data
     if goals:
         for g in goals:
             st.write(f"**{g['name']}** — {CURRENCY_SYMBOL} {g['saved_amount']:,.0f} / {g['target_amount']:,.0f}")
@@ -579,7 +588,7 @@ if page == "Dashboard":
 
     st.write("")
     st.subheader("Recent Transactions")
-    transactions = db.get_transactions(user_id)
+    transactions = transaction_controller.list_transactions(user_id).data
     if transactions:
         render_transactions_table(transactions)
     else:
@@ -591,7 +600,7 @@ if page == "Dashboard":
 elif page == "Add Transaction":
     st.title("Add Transaction")
 
-    categories = db.get_categories(user_id)
+    categories = category_controller.list_names(user_id).data
 
     with st.form("add_transaction_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
@@ -606,30 +615,23 @@ elif page == "Add Transaction":
         submitted = st.form_submit_button("Add Transaction")
 
         if submitted:
-            if not category or amount <= 0:
-                st.error("Please select a category and enter an amount greater than 0.")
+            result = transaction_controller.add_transaction(
+                user_id, str(date), type_, category, amount, note
+            )
+            if result.ok:
+                st.success(f"{type_.capitalize()} of {CURRENCY_SYMBOL} {amount:,.0f} added to {category}!")
+            elif result.error == "budget_exceeded":
+                blocked = result.data
+                st.error(
+                    f"🚫 Transaction not added: it would exceed your {blocked['category']} budget. "
+                    f"Spent {CURRENCY_SYMBOL} {blocked['spent']:,.0f} + this "
+                    f"{CURRENCY_SYMBOL} {blocked['amount']:,.0f} is over the limit of "
+                    f"{CURRENCY_SYMBOL} {blocked['limit']:,.0f} "
+                    f"(over by {CURRENCY_SYMBOL} {blocked['over_by']:,.0f}). "
+                    f"Increase the budget on the Budgets page or lower the amount."
+                )
             else:
-                # Budget guard: an expense that would push the category over its
-                # monthly budget is NOT saved.
-                blocked = None
-                if type_ == "expense":
-                    blocked = logic.would_exceed_budget(user_id, category, amount, str(date)[:7])
-
-                if blocked:
-                    st.error(
-                        f"🚫 Transaction not added: it would exceed your {blocked['category']} budget. "
-                        f"Spent {CURRENCY_SYMBOL} {blocked['spent']:,.0f} + this "
-                        f"{CURRENCY_SYMBOL} {blocked['amount']:,.0f} is over the limit of "
-                        f"{CURRENCY_SYMBOL} {blocked['limit']:,.0f} "
-                        f"(over by {CURRENCY_SYMBOL} {blocked['over_by']:,.0f}). "
-                        f"Increase the budget on the Budgets page or lower the amount."
-                    )
-                else:
-                    try:
-                        db.add_transaction(user_id, str(date), type_, category, amount, note)
-                        st.success(f"{type_.capitalize()} of {CURRENCY_SYMBOL} {amount:,.0f} added to {category}!")
-                    except ValueError as e:
-                        st.error(str(e))
+                st.error(result.message)
 
     with st.expander("➕ Don't see your category? Add a new one"):
         new_cat_col1, new_cat_col2 = st.columns([3, 1])
@@ -641,19 +643,16 @@ elif page == "Add Transaction":
             st.write("")
             st.write("")
             if st.button("Add Category", key="add_category_btn"):
-                if not new_category_name.strip():
-                    st.error("Please enter a category name.")
+                result = category_controller.add_category(user_id, new_category_name)
+                if result.ok:
+                    st.success(result.message)
+                    st.rerun()
                 else:
-                    ok, result = db.add_category(user_id, new_category_name)
-                    if ok:
-                        st.success(f"Category '{result}' added! Select it above.")
-                        st.rerun()
-                    else:
-                        st.error(result)
+                    st.error(result.message)
 
     st.write("")
     st.subheader("All Transactions")
-    transactions = db.get_transactions(user_id)
+    transactions = transaction_controller.list_transactions(user_id).data
     if transactions:
         render_transactions_table(transactions, show_id=True)
 
@@ -661,7 +660,7 @@ elif page == "Add Transaction":
         del_id = st.number_input("Enter transaction ID to delete", min_value=0, step=1)
         if st.button("Delete Transaction"):
             if del_id > 0:
-                db.delete_transaction(int(del_id))
+                transaction_controller.delete_transaction(int(del_id))
                 st.success(f"Transaction #{del_id} deleted.")
                 st.rerun()
     else:
@@ -673,7 +672,7 @@ elif page == "Add Transaction":
 elif page == "Budgets":
     st.title("Budgets")
 
-    categories = db.get_categories(user_id)
+    categories = category_controller.list_names(user_id).data
 
     with st.form("set_budget_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
@@ -684,15 +683,15 @@ elif page == "Budgets":
 
         submitted = st.form_submit_button("Set Budget")
         if submitted:
-            if not category or limit <= 0:
-                st.error("Please select a category and enter a limit greater than 0.")
-            else:
-                db.set_budget(user_id, category, limit)
+            result = budget_controller.set_budget(user_id, category, limit)
+            if result.ok:
                 st.success(f"Budget for {category} set to {CURRENCY_SYMBOL} {limit:,.0f}/month.")
+            else:
+                st.error(result.message)
 
     st.write("")
     st.subheader("Current Budgets")
-    budgets = db.get_budgets(user_id)
+    budgets = budget_controller.list_budgets(user_id).data
     if budgets:
         render_simple_table(budgets, [("category", "Category"), ("monthly_limit", f"Monthly Limit ({CURRENCY_SYMBOL})")])
     else:
@@ -713,27 +712,27 @@ elif page == "Savings Goals":
 
         submitted = st.form_submit_button("Add Goal")
         if submitted:
-            if not name or target <= 0:
-                st.error("Please enter a valid goal name and target amount.")
-            else:
-                db.add_savings_goal(user_id, name.strip(), target)
+            result = savings_controller.add_goal(user_id, name, target)
+            if result.ok:
                 st.success(f"Savings goal '{name}' added!")
+            else:
+                st.error(result.message)
 
     st.write("")
     st.subheader("Update Progress")
-    goals = db.get_savings_goals(user_id)
+    goals = savings_controller.list_goals(user_id).data
     if goals:
         goal_names = {f"{g['name']} (ID {g['id']})": g["id"] for g in goals}
         selected = st.selectbox("Select Goal", list(goal_names.keys()))
         new_amount = st.number_input("Amount Saved So Far", min_value=0.0, step=100.0)
         if st.button("Update Progress"):
-            db.update_savings_progress(goal_names[selected], new_amount)
+            savings_controller.update_progress(goal_names[selected], new_amount)
             st.success("Progress updated!")
             st.rerun()
 
         st.write("")
         st.subheader("All Goals")
-        for g in logic.get_savings_progress(user_id):
+        for g in savings_controller.goals_progress(user_id).data:
             st.write(f"**{g['name']}** — {CURRENCY_SYMBOL} {g['saved_amount']:,.0f} / {g['target_amount']:,.0f}")
             st.progress(g["percent"] / 100)
     else:
