@@ -4,3 +4,4 @@ __pycache__/
 expensemate.db
 profile_pics/
 *.csv
+backups/

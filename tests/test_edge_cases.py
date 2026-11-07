@@ -161,17 +161,19 @@ def test_import_completely_empty_file_does_not_crash(user_id, tmp_path):
 # Category deletion while in use
 # ---------------------------------------------------------------------------
 
-def test_deleting_a_category_does_not_touch_existing_transactions(user_id):
+def test_category_in_use_cannot_be_deleted(user_id):
     """
-    Categories are stored as free TEXT on the transaction row (not a foreign
-    key), so deleting a category leaves existing transactions referencing a
-    name that no longer exists in the dropdown. (Known limitation.)
+    Migration 001 made transactions.category_id a foreign key. A category that
+    transactions still point to can no longer be deleted (before the migration
+    this silently left transactions pointing at a name missing from the
+    dropdown). The transaction must be untouched.
     """
     db.add_transaction(user_id, "2026-09-01", "expense", "Gym", 100)
-    db.delete_category(user_id, "Gym")  # "Gym" was never added as a category, so this is a no-op
+    with pytest.raises(ValueError, match="used by"):
+        db.delete_category(user_id, "Gym")
     txns = db.get_transactions(user_id)
     assert txns[0]["category"] == "Gym"
-    assert "Gym" not in db.get_categories(user_id)
+    assert "Gym" in db.get_categories(user_id)
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import re
 from datetime import date
 
 DB_NAME = "expensemate.db"
+SCHEMA_VERSION = 1   # 1 = category_id foreign keys (migration m001)
 
 DEFAULT_CATEGORIES = [
     "Food",
@@ -64,6 +65,7 @@ def get_connection():
     #bug3 fix
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")   # enforce the foreign keys
     return conn
 
 
@@ -71,6 +73,18 @@ def init_db():
     """Create all required tables if they do not already exist."""
     conn = get_connection()
     cur = conn.cursor()
+
+    existing = {r[0] for r in cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    fresh_database = "transactions" not in existing
+    if not fresh_database:
+        txn_columns = {r[1] for r in cur.execute("PRAGMA table_info(transactions)")}
+        if "category_id" not in txn_columns:
+            conn.close()
+            raise RuntimeError(
+                f"'{DB_NAME}' still uses the old schema (free-text categories). "
+                f"Run:  python migrations/m001_category_fk.py --db {DB_NAME}"
+            )
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -95,10 +109,11 @@ def init_db():
             user_id INTEGER NOT NULL,
             date TEXT NOT NULL,
             type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
-            category TEXT NOT NULL,
+            category_id INTEGER NOT NULL,
             amount REAL NOT NULL,
             note TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id)
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (category_id) REFERENCES categories(id)
         )
     """)
 
@@ -106,10 +121,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS budgets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
-            category TEXT NOT NULL,
+            category_id INTEGER NOT NULL,
             monthly_limit REAL NOT NULL,
-            UNIQUE(user_id, category),
-            FOREIGN KEY (user_id) REFERENCES users(id)
+            UNIQUE(user_id, category_id),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (category_id) REFERENCES categories(id)
         )
     """)
 
@@ -138,8 +154,43 @@ def init_db():
         )
     """)
 
+    # Records which schema migrations have been applied (see migrations/).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            description TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        )
+    """)
+    if fresh_database:
+        # A brand-new database is created directly in the latest schema.
+        cur.execute(
+            "INSERT OR IGNORE INTO schema_version (version, description, applied_at) "
+            "VALUES (?, 'created with latest schema', datetime('now'))",
+            (SCHEMA_VERSION,),
+        )
+
     conn.commit()
     conn.close()
+
+
+def _category_id(cur, user_id, name):
+    """
+    Return the id of this user's category called `name` (case-insensitive),
+    creating it if it does not exist yet. Keeps 'food' and 'Food' as ONE category.
+    """
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("Category cannot be empty.")
+    cur.execute(
+        "SELECT id FROM categories WHERE user_id = ? AND name = ? COLLATE NOCASE",
+        (user_id, name),
+    )
+    row = cur.fetchone()
+    if row:
+        return row["id"]
+    cur.execute("INSERT INTO categories (user_id, name) VALUES (?, ?)", (user_id, name))
+    return cur.lastrowid
 
 
 
@@ -232,9 +283,10 @@ def add_transaction(user_id, date, type_, category, amount, note=""):
     date = validate_date(date)
     conn = get_connection()
     cur = conn.cursor()
+    category_id = _category_id(cur, user_id, category)
     cur.execute(
-        "INSERT INTO transactions (user_id, date, type, category, amount, note) VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, date, type_, category, amount, note),
+        "INSERT INTO transactions (user_id, date, type, category_id, amount, note) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, date, type_, category_id, amount, note),
     )
     conn.commit()
     conn.close()
@@ -244,7 +296,12 @@ def get_transactions(user_id):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM transactions WHERE user_id = ? ORDER BY date DESC, id DESC",
+        """SELECT t.id, t.user_id, t.date, t.type, c.name AS category,
+                  t.category_id, t.amount, t.note
+           FROM transactions t
+           JOIN categories c ON c.id = t.category_id
+           WHERE t.user_id = ?
+           ORDER BY t.date DESC, t.id DESC""",
         (user_id,),
     )
     rows = cur.fetchall()
@@ -256,11 +313,16 @@ def update_transaction(txn_id, date, type_, category, amount, note=""):
     date = validate_date(date)
     conn = get_connection()
     cur = conn.cursor()
+    owner = cur.execute("SELECT user_id FROM transactions WHERE id=?", (txn_id,)).fetchone()
+    if owner is None:
+        conn.close()
+        return
+    category_id = _category_id(cur, owner["user_id"], category)
     cur.execute(
         """UPDATE transactions
-           SET date=?, type=?, category=?, amount=?, note=?
+           SET date=?, type=?, category_id=?, amount=?, note=?
            WHERE id=?""",
-        (date, type_, category, amount, note, txn_id),
+        (date, type_, category_id, amount, note, txn_id),
     )
     conn.commit()
     conn.close()
@@ -282,11 +344,12 @@ def set_budget(user_id, category, monthly_limit):
         raise ValueError("Monthly limit must be zero or greater.")
     conn = get_connection()
     cur = conn.cursor()
+    category_id = _category_id(cur, user_id, category)
     cur.execute("""
-        INSERT INTO budgets (user_id, category, monthly_limit)
+        INSERT INTO budgets (user_id, category_id, monthly_limit)
         VALUES (?, ?, ?)
-        ON CONFLICT(user_id, category) DO UPDATE SET monthly_limit=excluded.monthly_limit
-    """, (user_id, category, monthly_limit))
+        ON CONFLICT(user_id, category_id) DO UPDATE SET monthly_limit=excluded.monthly_limit
+    """, (user_id, category_id, monthly_limit))
     conn.commit()
     conn.close()
 
@@ -294,7 +357,13 @@ def set_budget(user_id, category, monthly_limit):
 def get_budgets(user_id):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM budgets WHERE user_id = ?", (user_id,))
+    cur.execute(
+        """SELECT b.id, b.user_id, c.name AS category, b.category_id, b.monthly_limit
+           FROM budgets b
+           JOIN categories c ON c.id = b.category_id
+           WHERE b.user_id = ?""",
+        (user_id,),
+    )
     rows = cur.fetchall()
     conn.close()
     return [dict(row) for row in rows]
@@ -376,8 +445,22 @@ def add_category(user_id, name):
 
 
 def delete_category(user_id, name):
+    """Delete an unused category. A category that transactions or budgets still
+    point to cannot be deleted (foreign key), so we explain why instead of failing."""
     conn = get_connection()
     cur = conn.cursor()
+    row = cur.execute(
+        "SELECT id FROM categories WHERE user_id = ? AND name = ?", (user_id, name)
+    ).fetchone()
+    if row is not None:
+        in_use = cur.execute(
+            "SELECT (SELECT COUNT(*) FROM transactions WHERE category_id = ?) "
+            "     + (SELECT COUNT(*) FROM budgets WHERE category_id = ?)",
+            (row["id"], row["id"]),
+        ).fetchone()[0]
+        if in_use:
+            conn.close()
+            raise ValueError(f"Category '{name}' is used by existing transactions or budgets.")
     cur.execute("DELETE FROM categories WHERE user_id = ? AND name = ?", (user_id, name))
     conn.commit()
     conn.close()
