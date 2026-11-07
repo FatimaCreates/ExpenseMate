@@ -1,0 +1,5 @@
+﻿........................................................................ [ 77%]
+................F....                                                    [100%]
+=========================== short test summary info ===========================
+FAILED tests/test_performance.py::test_bulk_insert_500_transactions_completes_quickly
+1 failed, 92 passed in 33.81s

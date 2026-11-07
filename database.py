@@ -9,6 +9,8 @@ Responsibilities:
 
 import sqlite3
 import hashlib
+import re
+from datetime import date
 
 DB_NAME = "expensemate.db"
 
@@ -31,6 +33,28 @@ SUPPORTED_CURRENCIES = {
     "EUR": "€",
     "GBP": "£",
 }
+
+
+def validate_date(value):
+    """
+    Validate and normalise a transaction date.
+
+    Accepts 'YYYY-M-D' / 'YYYY-MM-DD' and returns zero-padded 'YYYY-MM-DD'
+    (so the monthly filter `startswith('YYYY-MM')` always matches).
+    Raises ValueError("Invalid date ...") for malformed/impossible dates and
+    ValueError("... in the future") for dates after today.
+    """
+    text = str(value).strip() if value is not None else ""
+    if not re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", text):
+        raise ValueError(f"Invalid date '{value}'. Use YYYY-MM-DD.")
+    year, month, day = (int(part) for part in text.split("-"))
+    try:
+        parsed = date(year, month, day)
+    except ValueError:
+        raise ValueError(f"Invalid date '{value}'. Use YYYY-MM-DD.")
+    if parsed > date.today():
+        raise ValueError(f"Date '{parsed.isoformat()}' is in the future.")
+    return parsed.isoformat()
 
 
 def get_connection():
@@ -127,6 +151,11 @@ def _hash_password(password):
 
 
 def register_user(username, password, currency="PKR"):
+    username = (username or "").strip()
+    if not username:
+        return False, "Username cannot be empty."
+    if not password:
+        return False, "Password cannot be empty."
     if currency not in SUPPORTED_CURRENCIES:
         currency = "PKR"
 
@@ -200,6 +229,7 @@ def set_user_currency(user_id, currency):
 def add_transaction(user_id, date, type_, category, amount, note=""):
     if amount is None or amount < 0:
         raise ValueError("Amount must be zero or greater.") #bug1 fix
+    date = validate_date(date)
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
@@ -223,6 +253,7 @@ def get_transactions(user_id):
 
 
 def update_transaction(txn_id, date, type_, category, amount, note=""):
+    date = validate_date(date)
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(

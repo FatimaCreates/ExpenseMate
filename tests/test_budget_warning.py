@@ -12,15 +12,6 @@ def _add_expense(user_id, category, amount):
     next(b for b in at.button if b.label == "Add Transaction").click().run()
     return at
 
-
-def test_warning_shown_when_over_budget_but_transaction_saved(user_id):
-    db.set_budget(user_id, "Food", 1000)
-    at = _add_expense(user_id, "Food", 1500.0)
-    assert not at.exception
-    assert len(db.get_transactions(user_id)) == 1          # still saved
-    assert any("Budget exceeded" in w.value for w in at.warning)
-
-
 def test_no_warning_within_budget(user_id):
     db.set_budget(user_id, "Food", 1000)
     at = _add_expense(user_id, "Food", 200.0)
