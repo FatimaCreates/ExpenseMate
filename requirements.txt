@@ -1,0 +1,17 @@
+# ExpenseMate - Python dependencies
+# Python 3.10 or newer (run on Windows / Python 3.10; test suite also run on Python 3.12).
+# Install with:  pip install -r requirements.txt
+#
+# Versions below are minimums. The full test suite (194 tests) was last run
+# against: streamlit 1.67.0, matplotlib 3.11.2, pytest 9.2.0, pytest-cov 7.1.0.
+
+# --- Needed to run the app ---
+streamlit>=1.28        # UI; 1.28+ is also required for streamlit.testing (AppTest) used in tests
+matplotlib>=3.7        # category charts on the dashboard
+
+# --- Needed to run the tests ---
+pytest>=7.0
+pytest-cov>=4.0        # coverage numbers quoted in the reports (pytest --cov=...)
+
+# --- Optional: only to reproduce the maintainability metrics in the reports ---
+radon>=5.1             # radon cc -a / radon mi -s
