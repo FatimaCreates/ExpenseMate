@@ -16,6 +16,7 @@ DB_NAME = "expensemate.db"
 SCHEMA_VERSION = 1   # 1 = category_id foreign keys (migration m001)
 
 from constants import DEFAULT_CATEGORIES, SUPPORTED_CURRENCIES  # noqa: F401 (re-exported)
+from schema import SchemaManager
 
 
 def validate_date(value):
@@ -36,108 +37,8 @@ def get_connection():
 
 
 def init_db():
-    """Create all required tables if they do not already exist."""
-    conn = get_connection()
-    cur = conn.cursor()
-
-    existing = {r[0] for r in cur.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'")}
-    fresh_database = "transactions" not in existing
-    if not fresh_database:
-        txn_columns = {r[1] for r in cur.execute("PRAGMA table_info(transactions)")}
-        if "category_id" not in txn_columns:
-            conn.close()
-            raise RuntimeError(
-                f"'{DB_NAME}' still uses the old schema (free-text categories). "
-                f"Run:  python migrations/m001_category_fk.py --db {DB_NAME}"
-            )
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            currency TEXT NOT NULL DEFAULT 'PKR'
-        )
-    """)
-
-    # Migration: add the currency column for databases created before
-    # multi-currency support existed (CREATE TABLE IF NOT EXISTS above
-    # won't add it to an already-existing users table).
-    try:
-        cur.execute("ALTER TABLE users ADD COLUMN currency TEXT NOT NULL DEFAULT 'PKR'")
-    except sqlite3.OperationalError:
-        pass  # column already exists
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            date TEXT NOT NULL,
-            type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
-            category_id INTEGER NOT NULL,
-            amount REAL NOT NULL,
-            note TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id),
-            FOREIGN KEY (category_id) REFERENCES categories(id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS budgets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            category_id INTEGER NOT NULL,
-            monthly_limit REAL NOT NULL,
-            UNIQUE(user_id, category_id),
-            FOREIGN KEY (user_id) REFERENCES users(id),
-            FOREIGN KEY (category_id) REFERENCES categories(id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS savings_goals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            target_amount REAL NOT NULL,
-            saved_amount REAL NOT NULL DEFAULT 0,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )
-    """)
-
-    # NEW: categories table. Each user has their own list of categories
-    # (starting from DEFAULT_CATEGORIES) so Add Transaction / Budgets can use
-    # a dropdown instead of free text, avoiding duplicate categories that
-    # differ only by capitalization or spelling (e.g. "Food" vs "food").
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS categories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            UNIQUE(user_id, name),
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )
-    """)
-
-    # Records which schema migrations have been applied (see migrations/).
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS schema_version (
-            version INTEGER PRIMARY KEY,
-            description TEXT NOT NULL,
-            applied_at TEXT NOT NULL
-        )
-    """)
-    if fresh_database:
-        # A brand-new database is created directly in the latest schema.
-        cur.execute(
-            "INSERT OR IGNORE INTO schema_version (version, description, applied_at) "
-            "VALUES (?, 'created with latest schema', datetime('now'))",
-            (SCHEMA_VERSION,),
-        )
-
-    conn.commit()
-    conn.close()
+    """Create all required tables if they do not already exist (see schema.py)."""
+    SchemaManager(get_connection, DB_NAME, SCHEMA_VERSION).apply()
 
 
 # ---------------------------------------------------------------------------
