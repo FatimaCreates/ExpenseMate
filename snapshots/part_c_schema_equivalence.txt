@@ -1,0 +1,5 @@
+SAME  fresh database: old=ok new=ok
+SAME  users table without currency column: old=ok new=ok
+SAME  old free-text schema (must refuse): old=RuntimeError new=RuntimeError
+SAME  second init_db() changes nothing
+RESULT: all equivalent
